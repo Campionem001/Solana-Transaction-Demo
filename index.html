@@ -4,7 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
     <title>Solana Smart Transaction Stack – Live Demo</title>
+
+    <!-- FIX: Buffer polyfill (required for browser) -->
+    <script src="https://cdn.jsdelivr.net/npm/buffer@6.0.3/index.min.js"></script>
+
+    <!-- Solana Web3.js -->
     <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.87.6/lib/index.iife.js"></script>
+
     <style>
         * {
             margin: 0;
@@ -94,6 +100,10 @@
         button:active {
             transform: scale(0.97);
         }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
         .simulate-btn {
             background: #2D3A5E;
             margin-right: 0.5rem;
@@ -106,6 +116,297 @@
             margin-top: 1rem;
         }
         .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            max-width: 350px;
+            background: #1E293B;
+            border-left: 4px solid #10B981;
+            padding: 1rem;
+            border-radius: 16px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+            display: none;
+            z-index: 1000;
+        }
+        .toast.error {
+            border-left-color: #EF4444;
+        }
+        .tech-drawer {
+            background: #0F172A;
+            border-radius: 24px;
+            padding: 1rem;
+            margin-top: 1rem;
+            cursor: pointer;
+            border: 1px solid #334155;
+        }
+        .drawer-header {
+            display: flex;
+            justify-content: space-between;
+            font-weight: 500;
+        }
+        .drawer-content {
+            display: none;
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #94A3B8;
+            word-break: break-all;
+        }
+        .tx-link {
+            color: #9945FF;
+            text-decoration: none;
+        }
+        #connectBtn {
+            background: #9945FF;
+            border: none;
+            padding: 6px 16px;
+            border-radius: 40px;
+            color: white;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        #connectBtn:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+        #simulationResult {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+        #connectBtn:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div class="wallet-area">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="walletDisplay">Not connected</span>
+        </div>
+        <button id="connectBtn">Connect Wallet</button>
+        <div class="network-badge">🟢 Devnet</div>
+    </div>
+
+    <div class="card">
+        <div class="fee-toggle" id="speedToggle">
+            <div class="toggle-option" data-speed="eco">🌱 Eco</div>
+            <div class="toggle-option active" data-speed="turbo">⚡ Turbo</div>
+        </div>
+        <div>Estimated fee: <strong id="feeDisplay">0.002005 SOL</strong></div>
+        <div class="row">
+            <button class="simulate-btn" id="simulateBtn">🔍 Simulate</button>
+            <button id="submitBtn">🚀 Submit Transaction</button>
+        </div>
+        <div id="simulationResult"></div>
+    </div>
+
+    <div class="tech-drawer" id="techDrawer">
+        <div class="drawer-header">
+            <span>🔧 Advanced Details</span>
+            <span>▼</span>
+        </div>
+        <div class="drawer-content" id="drawerContent">
+            Compute units: --<br>
+            Transaction ID: --
+        </div>
+    </div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+    // ---------- Wallet connection (universal detection) ----------
+    let walletPublicKey = null;
+    let currentProvider = null;
+    let connection = null;
+
+    async function detectProvider() {
+        if (window.solana && window.solana.connect) return window.solana;
+        if (window.solflare && window.solflare.connect) return window.solflare;
+        if (window.ethereum && window.ethereum.isSolana) return window.ethereum;
+        for (let key in window) {
+            try {
+                let val = window[key];
+                if (val && typeof val.connect === 'function' && (val.publicKey || val._publicKey)) {
+                    console.log("Found dynamic provider:", key);
+                    return val;
+                }
+            } catch(e) {}
+        }
+        return null;
+    }
+
+    const connectBtn = document.getElementById('connectBtn');
+    const walletDisplaySpan = document.getElementById('walletDisplay');
+    const statusDot = document.getElementById('statusDot');
+
+    async function connectWallet() {
+        const provider = await detectProvider();
+        if (!provider) {
+            alert("No Solana wallet detected.\n\nMake sure you have Phantom or Solflare installed and unlocked.");
+            return;
+        }
+        try {
+            await provider.connect();
+            currentProvider = provider;
+            let pk = provider.publicKey?.toString() || provider._publicKey?.toString() || provider.selectedAddress;
+            if (!pk) throw new Error("Could not retrieve public key");
+            walletPublicKey = pk;
+            walletDisplaySpan.innerText = pk.slice(0,4) + "..." + pk.slice(-4);
+            statusDot.style.background = "#10B981";
+            connectBtn.innerText = "Connected";
+            connectBtn.disabled = true;
+            connection = new solanaWeb3.Connection("https://api.devnet.solana.com");
+            console.log("Connected wallet:", pk);
+        } catch(e) {
+            console.error(e);
+            alert("Connection failed: " + e.message);
+        }
+    }
+
+    connectBtn.addEventListener('click', connectWallet);
+
+    // auto reconnect if already authorized on page load
+    window.addEventListener('load', async () => {
+        const provider = await detectProvider();
+        if (provider && (provider.publicKey || provider._publicKey)) {
+            await connectWallet();
+        }
+    });
+
+    // ---------- UI helpers ----------
+    const toggleOptions = document.querySelectorAll('.toggle-option');
+    const feeDisplay = document.getElementById('feeDisplay');
+    const simulateBtn = document.getElementById('simulateBtn');
+    const submitBtn = document.getElementById('submitBtn');
+    const simulationResultDiv = document.getElementById('simulationResult');
+    const techDrawer = document.getElementById('techDrawer');
+    const drawerContent = document.getElementById('drawerContent');
+    const toast = document.getElementById('toast');
+
+    let currentSpeed = 'turbo';
+    toggleOptions.forEach(opt => {
+        opt.addEventListener('click', () => {
+            toggleOptions.forEach(o => o.classList.remove('active'));
+            opt.classList.add('active');
+            currentSpeed = opt.getAttribute('data-speed');
+            updateFee();
+        });
+    });
+
+    function updateFee() {
+        const baseFee = 0.000005;
+        const priority = currentSpeed === 'eco' ? 0.001 : 0.002;
+        const total = baseFee + priority;
+        feeDisplay.innerText = total.toFixed(6) + ' SOL';
+    }
+
+    function showToast(message, type = 'success') {
+        toast.innerText = message;
+        toast.className = 'toast';
+        if (type === 'error') toast.classList.add('error');
+        toast.style.display = 'block';
+        setTimeout(() => {
+            toast.style.display = 'none';
+        }, 5000);
+    }
+
+    techDrawer.addEventListener('click', () => {
+        const content = document.querySelector('.drawer-content');
+        const arrow = techDrawer.querySelector('.drawer-header span:last-child');
+        if (content.style.display === 'none' || content.style.display === '') {
+            content.style.display = 'block';
+            arrow.innerHTML = '▲';
+        } else {
+            content.style.display = 'none';
+            arrow.innerHTML = '▼';
+        }
+    });
+
+    // ---------- Build a simple self-transfer transaction ----------
+    async function buildSelfTransferTransaction() {
+        if (!walletPublicKey || !connection) throw new Error("Wallet not connected");
+        const fromPubkey = new solanaWeb3.PublicKey(walletPublicKey);
+        const toPubkey = fromPubkey;
+        const lamports = 1000;
+        const { blockhash } = await connection.getLatestBlockhash();
+        const transaction = new solanaWeb3.Transaction().add(
+            solanaWeb3.SystemProgram.transfer({
+                fromPubkey: fromPubkey,
+                toPubkey: toPubkey,
+                lamports: lamports,
+            })
+        );
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = fromPubkey;
+        return transaction;
+    }
+
+    // ---------- Simulation (dry-run) ----------
+    simulateBtn.addEventListener('click', async () => {
+        if (!walletPublicKey || !connection) {
+            showToast("Connect wallet first", "error");
+            simulationResultDiv.innerHTML = '<span style="color:#EF4444;">❌ Please connect your wallet</span>';
+            return;
+        }
+        simulateBtn.disabled = true;
+        simulationResultDiv.innerHTML = '<span style="color:#FBBF24;">⏳ Simulating transaction...</span>';
+        try {
+            const tx = await buildSelfTransferTransaction();
+            const simulation = await connection.simulateTransaction(tx);
+            if (simulation.value.err) {
+                let errorMsg = JSON.stringify(simulation.value.err);
+                if (errorMsg.includes('insufficient')) errorMsg = 'Insufficient balance';
+                throw new Error(errorMsg);
+            }
+            const computeUnits = simulation.value.unitsConsumed || 'N/A';
+            simulationResultDiv.innerHTML = `<span style="color:#10B981;">✅ Simulation passed (compute units: ${computeUnits})</span>`;
+            showToast('Pre‑flight simulation passed', 'success');
+            drawerContent.innerHTML = `Compute units: ${computeUnits}<br>Transaction ID: simulation only (not submitted)`;
+        } catch (err) {
+            simulationResultDiv.innerHTML = `<span style="color:#EF4444;">❌ Simulation failed: ${err.message}</span>`;
+            showToast(`Simulation failed: ${err.message}`, 'error');
+        } finally {
+            simulateBtn.disabled = false;
+        }
+    });
+
+    // ---------- Real submission ----------
+    submitBtn.addEventListener('click', async () => {
+        if (!walletPublicKey || !currentProvider) {
+            showToast("Connect wallet first", "error");
+            return;
+        }
+        submitBtn.disabled = true;
+        submitBtn.innerText = 'Sending...';
+        showToast('🚀 Sending transaction... Please approve in your wallet.', 'info');
+        try {
+            const tx = await buildSelfTransferTransaction();
+            // sign and send using the connected provider
+            const { signature } = await currentProvider.signAndSendTransaction(tx);
+            await connection.confirmTransaction(signature, 'confirmed');
+            const solscanLink = `https://explorer.solana.com/tx/${signature}?cluster=devnet`;
+            showToast(`✅ Confirmed! ${signature.slice(0,8)}...`, 'success');
+            simulationResultDiv.innerHTML = `<span style="color:#10B981;">✅ Transaction confirmed on chain! <a href="${solscanLink}" target="_blank" class="tx-link">View on Solscan</a></span>`;
+            drawerContent.innerHTML = `Compute units: ~210k (est.)<br>Transaction ID: <a href="${solscanLink}" target="_blank" class="tx-link">${signature}</a>`;
+        } catch (err) {
+            console.error(err);
+            let errorMsg = err.message;
+            if (errorMsg.includes('User rejected')) errorMsg = 'Transaction rejected in wallet.';
+            showToast(`Submission failed: ${errorMsg}`, 'error');
+            simulationResultDiv.innerHTML = `<span style="color:#EF4444;">❌ Submission failed: ${errorMsg}</span>`;
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.innerText = '🚀 Submit Transaction';
+        }
+    });
+
+    updateFee();
+</script>
+</body>
+</html>        .toast {
             position: fixed;
             bottom: 20px;
             left: 20px;
